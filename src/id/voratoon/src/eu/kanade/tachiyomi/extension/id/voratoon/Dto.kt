@@ -125,6 +125,11 @@ class ChapterDetailResponse(
     val data: ChapterItem,
 )
 
+@Serializable
+class ProxyErrorResponse(
+    val code: String? = null,
+)
+
 private fun parseChapterDate(dateString: String): Long = Instant.tryParse(dateString)
 
 fun SManga.getSlug(baseUrl: String): String = (url.toHttpUrlOrNull() ?: "$baseUrl$url".toHttpUrl()).pathSegments[1]
