@@ -4,6 +4,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.Jsoup
 
 @Serializable
@@ -31,11 +32,11 @@ class BrowseManga(
     private val slug: String,
     private val cover: String? = null,
 ) {
-    fun toSManga() = SManga.create().apply {
+    fun toSManga(baseUrl: String) = SManga.create().apply {
         // old urls compatibility
         url = "/manga/$slug/"
         title = this@BrowseManga.title
-        thumbnail_url = this@BrowseManga.cover
+        thumbnail_url = this@BrowseManga.cover.toAbsoluteUrl(baseUrl)
     }
 }
 
@@ -57,7 +58,7 @@ class Manga(
         // old urls compatibility
         url = "/manga/$slug/"
         title = this@Manga.title
-        thumbnail_url = this@Manga.cover
+        thumbnail_url = this@Manga.cover.toAbsoluteUrl(baseUrl)
         author = this@Manga.author
         status = when (this@Manga.status?.lowercase()) {
             "ongoing" -> SManga.ONGOING
@@ -125,3 +126,5 @@ class ApiGenre(
     val name: String,
     val slug: String,
 )
+
+private fun String?.toAbsoluteUrl(baseUrl: String): String? = this?.let { baseUrl.toHttpUrl().resolve(it)?.toString() ?: it }
