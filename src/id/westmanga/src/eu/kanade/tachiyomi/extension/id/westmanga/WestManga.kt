@@ -23,6 +23,7 @@ abstract class WestManga : KeiSource() {
     private val visitTokenMutex = Mutex()
     private var visitToken: String? = null
     private var visitTokenExpiresAt = 0L
+    private var visitTokenBaseUrl: String? = null
 
     override suspend fun getPopularManga(page: Int) = getSearchMangaList(page, "", SortFilter.popular)
 
@@ -69,8 +70,10 @@ abstract class WestManga : KeiSource() {
     }
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
-        if (url.pathSegments.firstOrNull() != "comic") return null
-        val slug = url.pathSegments.getOrNull(1) ?: return null
+        val slug = when (url.pathSegments.firstOrNull()) {
+            "comic", "manga" -> url.pathSegments.getOrNull(1)
+            else -> null
+        } ?: return null
         val api = "$baseUrl/api/comic/$slug".toHttpUrl()
 
         return client.get(api, apiHeaders()).parseAs<Data<Manga>>().data
@@ -123,16 +126,21 @@ abstract class WestManga : KeiSource() {
         .build()
 
     private suspend fun getVisitToken(): String = visitTokenMutex.withLock {
+        val currentBaseUrl = baseUrl
         val now = System.currentTimeMillis() / 1000
         val cachedToken = visitToken
-        if (cachedToken != null && visitTokenExpiresAt - now > TOKEN_REFRESH_MARGIN) {
+        if (cachedToken != null &&
+            visitTokenBaseUrl == currentBaseUrl &&
+            visitTokenExpiresAt - now > TOKEN_REFRESH_MARGIN
+        ) {
             return@withLock cachedToken
         }
 
-        val url = "$baseUrl/api/visit-token".toHttpUrl()
+        val url = "$currentBaseUrl/api/visit-token".toHttpUrl()
         val token = client.get(url, headers, cacheControl = CacheControl.FORCE_NETWORK).parseAs<VisitToken>()
         visitToken = token.token
         visitTokenExpiresAt = token.expiresAt
+        visitTokenBaseUrl = currentBaseUrl
         token.token
     }
 }
