@@ -121,6 +121,12 @@ class ImageList(
 )
 
 @Serializable
+class VisitToken(
+    val token: String,
+    @SerialName("expires_at") val expiresAt: Long,
+)
+
+@Serializable
 class ApiGenre(
     val id: Int,
     val name: String,
