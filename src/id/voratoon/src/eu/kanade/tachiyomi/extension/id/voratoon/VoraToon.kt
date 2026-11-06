@@ -193,7 +193,7 @@ abstract class VoraToon : KeiSource() {
         ensureSession()
         val token = proxyToken
 
-        var response = proxyClient.get(url, sessionHeaders(), noStore, ensureSuccess = false)
+        var response = proxyClient.get(url, sessionHeaders(url), noStore, ensureSuccess = false)
         if (response.code != 403) {
             response.requireSuccess()
             return response
@@ -208,7 +208,7 @@ abstract class VoraToon : KeiSource() {
 
         ensureSession(force = true, staleToken = token)
 
-        response = proxyClient.get(url, sessionHeaders(), noStore, ensureSuccess = false)
+        response = proxyClient.get(url, sessionHeaders(url), noStore, ensureSuccess = false)
         if (response.code == 403) {
             val retryError = response.use {
                 runCatching { it.parseAs<ProxyErrorResponse>() }.getOrNull()
@@ -235,9 +235,10 @@ abstract class VoraToon : KeiSource() {
     private suspend fun bootstrapSession() {
         proxyUserAgent = headers["User-Agent"]?.takeIf { it.isNotBlank() }
 
+        val url = "$baseUrl/".toHttpUrl()
         val response = network.client.get(
-            "$baseUrl/",
-            sessionHeaders().newBuilder()
+            url,
+            sessionHeaders(url).newBuilder()
                 .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
                 .build(),
             noStore,
@@ -256,10 +257,11 @@ abstract class VoraToon : KeiSource() {
     }
 
     private suspend fun refreshSession(): Boolean {
+        val url = "$baseUrl/api/proxy-session".toHttpUrl()
         val response = try {
             proxyClient.post(
-                "$baseUrl/api/proxy-session",
-                sessionHeaders(),
+                url,
+                sessionHeaders(url),
                 ByteArray(0).toRequestBody(),
                 ensureSuccess = false,
             )
@@ -276,13 +278,11 @@ abstract class VoraToon : KeiSource() {
         }
     }
 
-    private fun sessionHeaders(): Headers {
+    private fun sessionHeaders(url: HttpUrl): Headers {
         val userAgent = proxyUserAgent ?: headers["User-Agent"]?.takeIf { it.isNotBlank() }
-            ?: return headers
 
-        return headers.newBuilder()
-            .set("User-Agent", userAgent)
-            .build()
+        // The proxy rejects a stale Origin even when its session cookie is valid.
+        return headers.proxyHeaders(url, userAgent)
     }
 
     private fun Response.requireSuccess() {
