@@ -1,90 +1,33 @@
 package eu.kanade.tachiyomi.extension.id.voratoon
 
 import eu.kanade.tachiyomi.source.model.Filter
-import okhttp3.HttpUrl
-
-interface UriFilter {
-    fun addToFilter(builder: StringBuilder)
-}
-
-interface UriQueryFilter {
-    fun addToQuery(builder: HttpUrl.Builder)
-}
 
 open class UriPartFilter(
     name: String,
-    private val field: String,
-    private val vals: Array<Pair<String, String>>,
-    private val default: String = "",
-) : Filter.Select<String>(
-    name,
-    vals.map { it.first }.toTypedArray(),
-    vals.indexOfFirst { it.second == default }.takeIf { it != -1 } ?: 0,
-),
-    UriQueryFilter {
-    override fun addToQuery(builder: HttpUrl.Builder) {
-        val selected = vals[state].second
-        if (selected.isNotEmpty()) {
-            builder.addQueryParameter(field, selected)
-        }
-    }
-}
-
-open class UriMultiSelectOption(name: String, val value: String) : Filter.CheckBox(name)
-
-open class UriMultiSelectFilter(
-    name: String,
-    private val field: String,
-    private val options: Array<Pair<String, String>>,
-) : Filter.Group<UriMultiSelectOption>(
-    name,
-    options.map { UriMultiSelectOption(it.first, it.second) },
-),
-    UriFilter {
-    override fun addToFilter(builder: StringBuilder) {
-        state.filter { it.state }.forEach {
-            appendFilter(builder, "$field==${it.value}")
-        }
-    }
-}
-
-private fun appendFilter(builder: StringBuilder, filter: String) {
-    if (builder.isNotEmpty()) {
-        builder.append(';')
-    }
-    builder.append(filter)
+    private val filterValues: Array<Pair<String, String>>,
+) : Filter.Select<String>(name, filterValues.map { it.first }.toTypedArray()) {
+    val selectedValue: String get() = filterValues[state].second
 }
 
 class SortFilter :
     UriPartFilter(
         "Sort",
-        "sort",
         arrayOf(
-            Pair("Popular", "popularity"),
-            Pair("Terbaru", "latest"),
+            Pair("Latest Update", ""),
+            Pair("New Series", "newseries"),
+            Pair("Most Bookmark", "bookmark"),
+            Pair("Popular", "popular"),
             Pair("Rating", "rating"),
-            Pair("A-Z", "title"),
+            Pair("A-Z", "az"),
         ),
-    )
-
-class SortOrderFilter :
-    UriPartFilter(
-        "Sort Order",
-        "sortOrder",
-        arrayOf(
-            Pair("Desc", "desc"),
-            Pair("Asc", "asc"),
-        ),
-        default = "desc",
     )
 
 class StatusFilter :
     UriPartFilter(
         "Status",
-        "status",
         arrayOf(
             Pair("Any", ""),
-            Pair("On Going", "ongoing"),
+            Pair("Ongoing", "ongoing"),
             Pair("Completed", "completed"),
             Pair("Hiatus", "hiatus"),
             Pair("Cancelled", "cancelled"),
@@ -94,12 +37,12 @@ class StatusFilter :
 class FormatFilter :
     UriPartFilter(
         "Format",
-        "format",
         arrayOf(
             Pair("Any", ""),
-            Pair("Manga", "manga"),
             Pair("Manhwa", "manhwa"),
             Pair("Manhua", "manhua"),
+            Pair("Manga", "manga"),
+            Pair("Mangatoon", "mangatoon"),
             Pair("Webtoon", "webtoon"),
         ),
     )
@@ -107,7 +50,6 @@ class FormatFilter :
 class TypeFilter :
     UriPartFilter(
         "Type",
-        "type",
         arrayOf(
             Pair("Any", ""),
             Pair("Project", "project"),
@@ -115,9 +57,77 @@ class TypeFilter :
         ),
     )
 
-class GenreFilter(genres: Array<Pair<String, String>>) :
-    UriMultiSelectFilter(
-        "Genre",
-        "genreIds",
-        genres,
+class AdaptationFilter :
+    UriPartFilter(
+        "Adaptation",
+        arrayOf(
+            Pair("Any", ""),
+            Pair("Animated", "yes"),
+            Pair("Yet Animated", "no"),
+        ),
     )
+
+class GenreFilter(private val genres: Array<Pair<String, String>>) :
+    Filter.Group<GenreOption>(
+        "Genres",
+        genres.map { GenreOption(it.first, it.second) },
+    ) {
+    val selectedValues: List<String> get() = state.filter { it.state }.map { it.value }
+}
+
+class GenreOption(name: String, val value: String) : Filter.CheckBox(name)
+
+class MinimumChaptersFilter : Filter.Text("Minimum Chapters") {
+    val selectedValue: Int get() = state.toIntOrNull()?.takeIf { it > 0 } ?: 0
+}
+
+internal val genres = arrayOf(
+    "Adult",
+    "4-Koma",
+    "Action",
+    "Adventure",
+    "Comedy",
+    "Cooking",
+    "Demons",
+    "Drama",
+    "Ecchi",
+    "Fantasy",
+    "Game",
+    "Gender Bender",
+    "Gore",
+    "Harem",
+    "Historical",
+    "Horror",
+    "Isekai",
+    "Josei",
+    "Magic",
+    "Martial Arts",
+    "Mature",
+    "Mecha",
+    "Medical",
+    "Military",
+    "Music",
+    "Mystery",
+    "One-Shot",
+    "Police",
+    "Psychological",
+    "Reincarnation",
+    "Romance",
+    "School",
+    "School Life",
+    "Sci-Fi",
+    "Seinen",
+    "Shoujo",
+    "Shoujo Ai",
+    "Shounen",
+    "Shounen Ai",
+    "Slice of Life",
+    "Sports",
+    "Super Power",
+    "Supernatural",
+    "Thriller",
+    "Tragedy",
+    "Vampire",
+    "Webtoons",
+    "Yuri",
+).map { it to it.lowercase() }.toTypedArray()
