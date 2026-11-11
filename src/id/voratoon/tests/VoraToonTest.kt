@@ -1,22 +1,25 @@
 package eu.kanade.tachiyomi.extension.id.voratoon
 
-import org.jsoup.Jsoup
+import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.SManga
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VoraToonTest {
-    @Test
-    fun latestUrlOmitsDefaultParameters() {
-        val url = browseUrl("https://example.com", page = 1)
+    private val json = Json { ignoreUnknownKeys = true }
 
-        assertEquals("https://example.com/browse", url.toString())
+    @Test
+    fun latestUrlUsesNewSort() {
+        val url = browseUrl("https://example.com", page = 1, filters = FilterList(SortFilter()))
+
+        assertEquals("https://example.com/browse?page=1&sort=new", url.toString())
     }
 
     @Test
     fun popularUrlUsesPopularSortAndPage() {
-        val url = browseUrl("https://example.com", page = 2, sort = "popular")
+        val url = browseUrl("https://example.com", page = 2, filters = FilterList(SortFilter("popular")))
 
         assertEquals("popular", url.queryParameter("sort"))
         assertEquals("2", url.queryParameter("page"))
@@ -28,13 +31,15 @@ class VoraToonTest {
             baseUrl = "https://example.com",
             page = 3,
             query = "slime",
-            sort = "rating",
-            status = "ongoing",
-            format = "manhua",
-            type = "mirror",
-            anime = "yes",
-            genres = listOf("action", "sci-fi"),
-            minimumChapters = 10,
+            filters = FilterList(
+                SortFilter("rating"),
+                StatusFilter("ongoing"),
+                FormatFilter("manhua"),
+                TypeFilter("mirror"),
+                AdaptationFilter("yes"),
+                genreFilter("action", "sci-fi"),
+                MinimumChaptersFilter().apply { state = "10" },
+            ),
         )
 
         assertEquals("slime", url.queryParameter("q"))
@@ -53,139 +58,179 @@ class VoraToonTest {
         val url = browseUrl(
             baseUrl = "https://example.com",
             page = 1,
-            status = "",
-            format = "",
-            type = "",
-            anime = "",
-            genres = emptyList(),
-            minimumChapters = 0,
+            filters = FilterList(
+                StatusFilter(),
+                FormatFilter(),
+                TypeFilter(),
+                AdaptationFilter(),
+                GenreFilter(staticGenres),
+                MinimumChaptersFilter(),
+            ),
         )
 
+        assertNull(url.queryParameter("q"))
         assertNull(url.queryParameter("genre"))
         assertNull(url.queryParameter("status"))
         assertNull(url.queryParameter("format"))
         assertNull(url.queryParameter("type"))
         assertNull(url.queryParameter("anime"))
+        assertNull(url.queryParameter("sort"))
         assertNull(url.queryParameter("min"))
+        assertEquals("1", url.queryParameter("page"))
     }
 
     @Test
-    fun parsesMangaCards() {
-        val document = Jsoup.parse(
+    fun mapsBrowseDto() {
+        val dto = json.decodeFromString<BrowseDto>(
             """
-            <article class="card card-project">
-              <a class="card-image-wrapper" href="/series/alpha">
-                <img src="https://cdn.example/alpha.webp"/>
-                <img src="https://flagcdn.com/w40/jp.png"/>
-              </a>
-              <div class="card-content"><a class="card-title" href="/series/alpha">Alpha</a></div>
-            </article>
-            <article class="card card-project">
-              <a class="card-image-wrapper" href="/series/beta">
-                <img src="https://cdn.example/beta.webp"/>
-              </a>
-              <div class="card-content"><a class="card-title" href="/series/beta">Beta</a></div>
-            </article>
-            <a aria-label="Halaman berikutnya" href="/browse?page=2">Next</a>
+            {
+              "series": [
+                {
+                  "id": 42,
+                  "data": {
+                    "slug": "alpha",
+                    "title": "Alpha",
+                    "author": "Writer",
+                    "status": "Ongoing",
+                    "synopsis": "Synopsis here",
+                    "coverImage": "https://cdn.example/alpha.webp",
+                    "genres": [
+                      {"data": {"name": "Action"}},
+                      {"data": {"name": "Fantasy"}}
+                    ]
+                  }
+                }
+              ],
+              "seriesMeta": {"page": 1, "lastPage": 4}
+            }
             """.trimIndent(),
         )
 
-        val page = document.parseMangaPage()
+        val item = dto.series.single()
 
-        assertEquals(2, page.mangas.size)
-        assertEquals("/series/alpha", page.mangas[0].url)
-        assertEquals("Alpha", page.mangas[0].title)
-        assertEquals("https://cdn.example/alpha.webp", page.mangas[0].thumbnailUrl)
-        assertEquals("/series/beta", page.mangas[1].url)
-        assertTrue(page.hasNextPage)
+        assertEquals("/series/alpha", item.seriesUrl())
+        assertEquals(SManga.ONGOING, item.statusCode())
+        assertEquals(1, dto.seriesMeta?.page)
+        assertEquals(4, dto.seriesMeta?.lastPage)
     }
 
     @Test
-    fun parsesMangaDetails() {
-        val document = Jsoup.parse(
+    fun seriesDtoFallsBackToIdWhenSlugIsMissing() {
+        val dto = json.decodeFromString<BrowseDto>(
+            """{"series":[{"id":7,"data":{"slug":null,"title":"Fallback"}}]}""",
+        )
+
+        assertEquals("/series/7", dto.series.single().seriesUrl())
+    }
+
+    @Test
+    fun mapsSeriesStatus() {
+        fun statusOf(value: String?): Int = json.decodeFromString<BrowseDto>(
+            """{"series":[{"id":1,"data":{"slug":"alpha","title":"Alpha","status":$value}}]}""",
+        ).series.single().statusCode()
+
+        assertEquals(SManga.COMPLETED, statusOf("\"Completed\""))
+        assertEquals(SManga.ON_HIATUS, statusOf("\"Hiatus\""))
+        assertEquals(SManga.CANCELLED, statusOf("\"Cancelled\""))
+        assertEquals(SManga.UNKNOWN, statusOf("null"))
+    }
+
+    @Test
+    fun mapsSeriesDetailsAndChapters() {
+        val dto = json.decodeFromString<SeriesDetailsDto>(
             """
-            <h1 class="series-title">Alpha</h1>
-            <img alt="Cover Alpha" src="https://cdn.example/alpha.webp"/>
-            <p class="synopsis synopsis-desktop">Synopsis here</p>
-            <div class="info-item">
-              <span class="info-label">Status</span>
-              <strong class="info-val"><span>ONGOING</span></strong>
-            </div>
-            <div class="info-list-item"><span>Author</span><strong>Writer</strong></div>
-            <div class="tags-container">
-              <a class="tag" href="/browse?genre=Action">Action</a>
-              <a class="tag" href="/browse?genre=Fantasy">Fantasy</a>
-            </div>
+            {
+              "series": [
+                {"id": 1, "data": {"slug": "alpha", "title": "Alpha", "status": "Completed"}}
+              ],
+              "chapters": [
+                {
+                  "chapterIndex": 12,
+                  "createdAt": "2026-11-11T06:42:55.155Z",
+                  "updatedAt": "2026-11-11T07:00:00.000Z",
+                  "data": {"title": "Prologue", "images": []}
+                }
+              ]
+            }
             """.trimIndent(),
         )
 
-        val details = document.parseMangaDetails("alpha")
+        assertEquals(SManga.COMPLETED, dto.series.single().statusCode())
 
-        assertEquals("Alpha", details.title)
-        assertEquals("https://cdn.example/alpha.webp", details.thumbnailUrl)
-        assertEquals("Synopsis here", details.description)
-        assertEquals("Writer", details.author)
-        assertEquals("Action, Fantasy", details.genre)
-        assertEquals("ONGOING", details.status)
-    }
+        val chapter = dto.chapters.single()
 
-    @Test
-    fun parsesChapterList() {
-        val document = Jsoup.parse(
-            """
-            <a class="chapter-item" href="/series/alpha/chapter/12">
-              <span class="chapter-title"><span class="chapter-number">Chapter 12</span></span>
-              <span class="chapter-meta"><span class="chapter-date">9 jam lalu</span></span>
-            </a>
-            <a class="chapter-item" href="/series/alpha/chapter/11">
-              <span class="chapter-title"><span class="chapter-number">Chapter 11</span></span>
-              <span class="chapter-meta"><span class="chapter-date">2 bulan lalu</span></span>
-            </a>
-            """.trimIndent(),
+        assertEquals("/series/alpha/chapter/12", chapter.chapterUrl("alpha"))
+        assertEquals("Chapter 12: Prologue", chapter.chapterName())
+        assertEquals(12f, chapter.chapterNumber())
+        assertEquals(
+            java.time.Instant.parse("2026-11-11T06:42:55.155Z").toEpochMilli(),
+            chapter.dateUpload(),
         )
-
-        val chapters = document.parseChapters()
-
-        assertEquals(2, chapters.size)
-        assertEquals("/series/alpha/chapter/12", chapters[0].url)
-        assertEquals("Chapter 12", chapters[0].name)
-        assertEquals(12f, chapters[0].number)
-        assertTrue(chapters[0].dateUpload > 0)
-        assertEquals(11f, chapters[1].number)
-        assertTrue(chapters[1].dateUpload < chapters[0].dateUpload)
     }
 
     @Test
-    fun parsesChapterPages() {
-        val document = Jsoup.parse(
+    fun mapsChapterPagesWithChapterUrlForReferer() {
+        val chapterUrl = "https://example.com/series/alpha/chapter/1"
+        val dto = json.decodeFromString<ChapterPageDto>(
             """
-            <img data-chapter-page="https://cdn.example/001.jpg" src="https://cdn.example/001.jpg"/>
-            <img data-chapter-page="https://cdn.example/002.jpg" src="https://cdn.example/002.jpg"/>
+            {
+              "chapter": {
+                "chapterIndex": 1,
+                "data": {
+                  "images": [
+                    "https://cdn.example/001.jpg",
+                    "https://cdn.example/002.jpg"
+                  ]
+                }
+              }
+            }
             """.trimIndent(),
         )
 
         assertEquals(
             listOf("https://cdn.example/001.jpg", "https://cdn.example/002.jpg"),
-            document.parsePages(),
+            dto.chapter.imageUrls(),
+        )
+
+        val pages = dto.chapter.toPageList(chapterUrl)
+
+        assertEquals(2, pages.size)
+        assertEquals(chapterUrl, pages[0].url)
+        assertEquals("https://cdn.example/001.jpg", pages[0].imageUrl)
+        assertEquals(chapterUrl, pages[1].url)
+        assertEquals("https://cdn.example/002.jpg", pages[1].imageUrl)
+    }
+
+    @Test
+    fun mapsGenreItems() {
+        val item = json.decodeFromString<GenreItem>("""{"data":{"name":"Sci-Fi"}}""")
+
+        assertEquals("Sci-Fi" to "sci-fi", item.toPair())
+    }
+
+    @Test
+    fun extractsSlugFromRelativeAndAbsoluteMangaUrls() {
+        assertEquals("alpha", seriesSlug("/series/alpha", "https://example.com"))
+        assertEquals("alpha", seriesSlug("https://example.com/series/alpha", "https://example.com"))
+    }
+
+    @Test
+    fun extractsSlugAndIndexFromChapterUrls() {
+        assertEquals(
+            "alpha" to "12.5",
+            chapterSlugAndIndex("/series/alpha/chapter/12.5", "https://example.com"),
+        )
+        assertEquals(
+            "alpha" to "12",
+            chapterSlugAndIndex("https://example.com/series/alpha/chapter/12", "https://example.com"),
+        )
+        assertEquals(
+            "alpha" to "7",
+            chapterSlugAndIndex("/chapter/alpha-chapter-7-bahasa-indonesia", "https://example.com"),
         )
     }
 
-    @Test
-    fun parsesIndonesianRelativeDates() {
-        val now = 1_700_000_000_000L
-
-        assertEquals(now - 9 * 60 * 60 * 1000, parseRelativeDate("9 jam lalu", now))
-        assertEquals(now - 14 * 24 * 60 * 60 * 1000, parseRelativeDate("14 hari lalu", now))
-        assertEquals(now - 2L * 30 * 24 * 60 * 60 * 1000, parseRelativeDate("2 bulan lalu", now))
-        assertEquals(now - 1L * 365 * 24 * 60 * 60 * 1000, parseRelativeDate("1 tahun lalu", now))
-    }
-
-    @Test
-    fun unknownRelativeDatesAreZero() {
-        val now = 1_700_000_000_000L
-
-        assertEquals(0L, parseRelativeDate(null, now))
-        assertEquals(0L, parseRelativeDate("", now))
-        assertEquals(0L, parseRelativeDate("kemarin", now))
+    private fun genreFilter(vararg selected: String) = GenreFilter(staticGenres).apply {
+        state.filter { it.value in selected }.forEach { it.state = true }
     }
 }

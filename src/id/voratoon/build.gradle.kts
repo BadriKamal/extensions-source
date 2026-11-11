@@ -23,7 +23,7 @@ dependencies {
     testImplementation(libs.kotlin.stdlib)
     testImplementation(libs.okhttp.core)
     testImplementation(libs.kotlin.json)
-    testImplementation(libs.jsoup)
+    testImplementation(libs.tachiyomi.lib.v16)
 }
 
 keiyoushi {

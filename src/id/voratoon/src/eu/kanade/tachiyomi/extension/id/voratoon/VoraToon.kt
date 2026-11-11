@@ -8,46 +8,54 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
+import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
-import keiyoushi.utils.asJsoup
+import keiyoushi.utils.extractNextJs
+import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonElement
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.OkHttpClient
 import okhttp3.Request
 
 @Source
 abstract class VoraToon : KeiSource() {
+
+    override fun OkHttpClient.Builder.configureClient() = apply {
+        rateLimit(3) { it.host == baseUrl.toHttpUrl().host }
+    }
 
     override fun Headers.Builder.configureHeaders(): Headers.Builder = apply {
         set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
         set("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
     }
 
-    override suspend fun getPopularManga(page: Int): MangasPage = client.get(
-        browseUrl(baseUrl, page, sort = "popular"),
-    ).asJsoup().parseMangaPage().toMangasPage()
+    private val rscHeaders: Headers
+        get() = headers.newBuilder().set("RSC", "1").build()
 
-    override suspend fun getLatestUpdates(page: Int): MangasPage = client.get(
-        browseUrl(baseUrl, page),
-    ).asJsoup().parseMangaPage().toMangasPage()
+    override suspend fun getPopularManga(page: Int): MangasPage = parseSeriesList(
+        browseUrl(baseUrl, page, filters = FilterList(SortFilter("popular"))),
+    )
 
-    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
-        val url = browseUrl(
-            baseUrl = baseUrl,
-            page = page,
-            query = query,
-            sort = filters.filterIsInstance<SortFilter>().firstOrNull()?.selectedValue.orEmpty(),
-            status = filters.filterIsInstance<StatusFilter>().firstOrNull()?.selectedValue.orEmpty(),
-            format = filters.filterIsInstance<FormatFilter>().firstOrNull()?.selectedValue.orEmpty(),
-            type = filters.filterIsInstance<TypeFilter>().firstOrNull()?.selectedValue.orEmpty(),
-            anime = filters.filterIsInstance<AdaptationFilter>().firstOrNull()?.selectedValue.orEmpty(),
-            genres = filters.filterIsInstance<GenreFilter>().firstOrNull()?.selectedValues.orEmpty(),
-            minimumChapters = filters.filterIsInstance<MinimumChaptersFilter>().firstOrNull()?.selectedValue ?: 0,
+    override suspend fun getLatestUpdates(page: Int): MangasPage = parseSeriesList(
+        browseUrl(baseUrl, page, filters = FilterList(SortFilter())),
+    )
+
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = parseSeriesList(browseUrl(baseUrl, page, query, filters))
+
+    private suspend fun parseSeriesList(url: HttpUrl): MangasPage {
+        val dto = client.get(url, rscHeaders).extractNextJs<BrowseDto> {
+            it is JsonObject && "series" in it && "seriesMeta" in it
+        } ?: return MangasPage(emptyList(), false)
+
+        return MangasPage(
+            mangas = dto.series.map { it.toSManga() },
+            hasNextPage = dto.seriesMeta?.let { (it.page ?: 0) < (it.lastPage ?: 0) } ?: false,
         )
-
-        return client.get(url).asJsoup().parseMangaPage().toMangasPage()
     }
 
     override suspend fun fetchMangaUpdate(
@@ -56,12 +64,18 @@ abstract class VoraToon : KeiSource() {
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
+        if (!fetchDetails && !fetchChapters) {
+            return SMangaUpdate(manga, chapters)
+        }
+
         val slug = manga.getSlug(baseUrl)
-        val document = client.get("$baseUrl/series/$slug").asJsoup()
+        val dto = client.get("$baseUrl/series/$slug", rscHeaders).extractNextJs<SeriesDetailsDto> {
+            it is JsonObject && "series" in it && "chapters" in it
+        } ?: return SMangaUpdate(manga, chapters)
 
         return SMangaUpdate(
-            manga = if (fetchDetails) document.parseMangaDetails(slug).toSManga(slug) else manga,
-            chapters = if (fetchChapters) document.parseChapters().map { it.toSChapter() } else chapters,
+            manga = if (fetchDetails) dto.series.firstOrNull()?.toSManga() ?: manga else manga,
+            chapters = if (fetchChapters) dto.chapters.map { it.toSChapter(slug) } else chapters,
         )
     }
 
@@ -69,74 +83,62 @@ abstract class VoraToon : KeiSource() {
         if (url.host != baseUrl.toHttpUrl().host) return null
         if (url.pathSegments.getOrNull(0) != "series") return null
         val slug = url.pathSegments.getOrNull(1) ?: return null
-
-        return client.get("$baseUrl/series/$slug").asJsoup().parseMangaDetails(slug).toSManga(slug)
+        val manga = SManga.create().apply {
+            this.url = "/series/$slug"
+        }
+        return getMangaUpdate(
+            manga,
+            emptyList(),
+            fetchDetails = true,
+            fetchChapters = false,
+        ).manga
     }
 
-    override suspend fun getPageList(chapter: SChapter): List<Page> = client.get(
-        if (chapter.url.startsWith("http")) chapter.url else "$baseUrl${chapter.url}",
-    ).asJsoup().parsePages().toPageList()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val (slug, chapterIndex) = chapter.getSlugAndIndex(baseUrl)
+        val chapterUrl = "$baseUrl/series/$slug/chapter/$chapterIndex"
+        val dto = client.get(chapterUrl, rscHeaders).extractNextJs<ChapterPageDto> {
+            it is JsonObject && "chapter" in it
+        } ?: error("Failed to extract chapter pages")
 
-    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
-        SortFilter(),
-        StatusFilter(),
-        FormatFilter(),
-        TypeFilter(),
-        AdaptationFilter(),
-        GenreFilter(genres),
-        MinimumChaptersFilter(),
-    )
+        return dto.chapter.toPageList(chapterUrl)
+    }
 
     override fun imageRequest(page: Page): Request = Request.Builder()
         .url(page.imageUrl!!)
         .headers(
-            headersBuilder()
+            headers.newBuilder()
                 .set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+                .set("Referer", page.url)
                 .build(),
         )
         .get()
         .build()
 
-    private fun ParsedMangaPage.toMangasPage(): MangasPage = MangasPage(
-        mangas = mangas.map { manga ->
-            SManga.create().apply {
-                url = manga.url
-                title = manga.title
-                thumbnail_url = manga.thumbnailUrl
-            }
-        },
-        hasNextPage = hasNextPage,
-    )
+    override val supportsFilterFetching: Boolean get() = true
 
-    private fun ParsedMangaDetails.toSManga(slug: String): SManga = SManga.create().apply {
-        url = "/series/$slug"
-        title = this@toSManga.title
-        thumbnail_url = this@toSManga.thumbnailUrl
-        description = this@toSManga.description
-        author = this@toSManga.author
-        genre = this@toSManga.genre
-        status = parseStatus(this@toSManga.status)
-        initialized = true
+    override suspend fun fetchFilterData(): JsonElement {
+        val dto = client.get("$baseUrl/browse", rscHeaders).extractNextJs<FilterPayloadDto> {
+            it is JsonObject && "genres" in it && "seriesMeta" in it
+        } ?: error("Failed to fetch filter data")
+        return dto.genres.toJsonElement()
     }
 
-    private fun ParsedChapter.toSChapter(): SChapter = SChapter.create().apply {
-        url = this@toSChapter.url
-        name = this@toSChapter.name
-        chapter_number = this@toSChapter.number
-        date_upload = this@toSChapter.dateUpload
-    }
+    override fun getFilterList(data: JsonElement?): FilterList {
+        val fetchedGenres = (data as? JsonArray)
+            ?.parseAs<List<GenreItem>>()
+            ?.map { it.toPair() }
+            ?.takeIf { it.isNotEmpty() }
+        val genres = fetchedGenres ?: staticGenres
 
-    private fun List<String>.toPageList(): List<Page> = mapIndexed { index, url ->
-        Page(index, imageUrl = url)
-    }
-
-    private fun parseStatus(status: String?): Int = when (status?.lowercase()) {
-        "ongoing" -> SManga.ONGOING
-        "completed" -> SManga.COMPLETED
-        "hiatus" -> SManga.ON_HIATUS
-        "cancelled", "canceled" -> SManga.CANCELLED
-        else -> SManga.UNKNOWN
+        return FilterList(
+            SortFilter(),
+            StatusFilter(),
+            FormatFilter(),
+            TypeFilter(),
+            AdaptationFilter(),
+            GenreFilter(genres),
+            MinimumChaptersFilter(),
+        )
     }
 }
-
-private fun SManga.getSlug(baseUrl: String): String = (url.toHttpUrlOrNull() ?: "$baseUrl$url".toHttpUrl()).pathSegments[1]
