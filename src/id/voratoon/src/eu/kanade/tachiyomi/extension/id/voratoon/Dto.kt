@@ -94,10 +94,12 @@ class Meta(
 
 @Serializable
 class ChapterItem(
+    internal val id: Long? = null,
     private val data: ChapterData,
     private val createdAt: String? = null,
     private val updatedAt: String? = null,
     private val chapterIndex: Float? = null,
+    internal val pagesTicket: String? = null,
 ) {
     fun toSChapter(seriesSlug: String?): SChapter = SChapter.create().apply {
         url = chapterUrl(seriesSlug)
@@ -106,8 +108,8 @@ class ChapterItem(
         chapter_number = chapterNumber()
     }
 
-    fun toPageList(chapterUrl: String): List<Page> = imageUrls().mapIndexed { index, imageUrl ->
-        Page(index, url = chapterUrl, imageUrl = imageUrl)
+    fun toPageList(chapterUrl: String, images: List<String> = imageUrls()): List<Page> = images.mapIndexed { index, imageUrl ->
+        Page(index, url = chapterUrl, imageUrl = imageUrl.trim())
     }
 
     internal fun chapterUrl(seriesSlug: String?): String = "/series/$seriesSlug/chapter/${formattedIndex()}"
@@ -134,6 +136,15 @@ class ChapterItem(
 class ChapterData(
     val index: Float? = null,
     val title: String? = null,
+    val images: List<String>? = null,
+)
+
+@Serializable
+class UnlockChapterPagesDto(
+    val ok: Boolean,
+    val reason: String? = null,
+    val message: String? = null,
+    val chapterId: Long? = null,
     val images: List<String>? = null,
 )
 

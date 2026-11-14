@@ -8,19 +8,27 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.extractNextJs
+import keiyoushi.utils.extractNextJsRsc
+import keiyoushi.utils.getTurnstileToken
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonElement
+import keiyoushi.utils.toJsonString
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 
 @Source
 abstract class VoraToon : KeiSource() {
@@ -97,11 +105,73 @@ abstract class VoraToon : KeiSource() {
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val (slug, chapterIndex) = chapter.getSlugAndIndex(baseUrl)
         val chapterUrl = "$baseUrl/series/$slug/chapter/$chapterIndex"
-        val dto = client.get(chapterUrl, rscHeaders).extractNextJs<ChapterPageDto> {
+        val rsc = client.get(chapterUrl, rscHeaders).use { it.body.string() }
+        val dto = rsc.extractNextJsRsc<ChapterPageDto> {
             it is JsonObject && "chapter" in it
         } ?: error("Failed to extract chapter pages")
 
-        return dto.chapter.toPageList(chapterUrl)
+        val images = dto.chapter.imageUrls()
+        if (images.isNotEmpty()) return dto.chapter.toPageList(chapterUrl, images)
+
+        val ticket = dto.chapter.pagesTicket ?: error("Failed to extract chapter pages")
+        val chunkPath = parseReaderChunkPath(rsc) ?: error("Failed to extract reader page script")
+        val unlocked = unlockChapterPages(chapterUrl, ticket, chunkPath)
+
+        check(unlocked.ok) { unlocked.message ?: "Failed to unlock chapter pages" }
+        if (dto.chapter.id != null && unlocked.chapterId != null) {
+            check(dto.chapter.id == unlocked.chapterId) { "Chapter page mismatch. Reload the chapter." }
+        }
+        val unlockedImages = unlocked.images.orEmpty()
+        check(unlockedImages.isNotEmpty()) { "No pages found" }
+        return dto.chapter.toPageList(chapterUrl, unlockedImages)
+    }
+
+    private val unlockMutex = Mutex()
+
+    @Volatile
+    private var cachedAction: Pair<String, String>? = null
+
+    private val actionMutex = Mutex()
+
+    private suspend fun unlockChapterPages(
+        chapterUrl: String,
+        ticket: String,
+        chunkPath: String,
+    ): UnlockChapterPagesDto = unlockMutex.withLock {
+        val actionId = getUnlockActionId(chunkPath)
+        val token = getTurnstileToken(
+            url = chapterUrl,
+            siteKey = TURNSTILE_SITE_KEY,
+            action = "reader",
+        )
+        val body = listOf(ticket, token).toJsonString()
+            .toRequestBody("text/plain; charset=UTF-8".toMediaType())
+        val actionHeaders = headers.newBuilder()
+            .set("Accept", "text/x-component")
+            .set("Next-Action", actionId)
+            .set("Referer", chapterUrl)
+            .build()
+        val response = client.post(chapterUrl, actionHeaders, body, ensureSuccess = false)
+        if (!response.isSuccessful) {
+            val code = response.code
+            response.close()
+            error("Failed to unlock chapter pages: HTTP $code")
+        }
+        response.extractNextJs<UnlockChapterPagesDto> {
+            it is JsonObject && "ok" in it
+        } ?: error("Failed to unlock chapter pages")
+    }
+
+    private suspend fun getUnlockActionId(chunkPath: String): String {
+        cachedAction?.takeIf { it.first == chunkPath }?.let { return it.second }
+        return actionMutex.withLock {
+            cachedAction?.takeIf { it.first == chunkPath }?.second ?: run {
+                val chunk = client.get("$baseUrl/_next/$chunkPath").use { it.body.string() }
+                val actionId = parseUnlockActionId(chunk) ?: error("Failed to extract reader action")
+                cachedAction = chunkPath to actionId
+                actionId
+            }
+        }
     }
 
     override fun imageRequest(page: Page): Request = Request.Builder()
@@ -141,4 +211,15 @@ abstract class VoraToon : KeiSource() {
             MinimumChaptersFilter(),
         )
     }
+
+    companion object {
+        private const val TURNSTILE_SITE_KEY = "0x4AAAAAAEOmIHqZQLQ6GPRc"
+    }
 }
+
+private val readerChunkRegex = Regex("""static/chunks/app/series/[^"]+/page-[^"]+\.js\?dpl=[^"]+""")
+private val unlockActionRegex = Regex("""createServerReference\)\("([0-9a-f]+)"[^)]*"unlockChapterPages"""")
+
+internal fun parseReaderChunkPath(rsc: String): String? = readerChunkRegex.find(rsc)?.value
+
+internal fun parseUnlockActionId(chunk: String): String? = unlockActionRegex.find(chunk)?.groupValues?.get(1)

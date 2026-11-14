@@ -5,6 +5,7 @@ import eu.kanade.tachiyomi.source.model.SManga
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VoraToonTest {
@@ -228,6 +229,58 @@ class VoraToonTest {
             "alpha" to "7",
             chapterSlugAndIndex("/chapter/alpha-chapter-7-bahasa-indonesia", "https://example.com"),
         )
+    }
+
+    @Test
+    fun parsesReaderChunkPathFromRsc() {
+        val rsc = """
+            "274","static/chunks/app/series/%5Bslug%5D/chapter/%5Bchapter%5D/page-b2bb5a726c433035.js?dpl=1794553167210-0f9c04d5-d2fd-4712-bbd7-b4d0a27d55a8"],"ReaderScreen"
+        """.trimIndent()
+
+        assertEquals(
+            "static/chunks/app/series/%5Bslug%5D/chapter/%5Bchapter%5D/page-b2bb5a726c433035.js?dpl=1794553167210-0f9c04d5-d2fd-4712-bbd7-b4d0a27d55a8",
+            parseReaderChunkPath(rsc),
+        )
+    }
+
+    @Test
+    fun parsesUnlockActionIdFromReaderChunk() {
+        val chunk = """(0,y.createServerReference)("60d1bbcd5ae753b54be8a4ecf238a7ed44beb27311",y.callServer,void 0,y.findSourceMapURL,"unlockChapterPages")"""
+
+        assertEquals("60d1bbcd5ae753b54be8a4ecf238a7ed44beb27311", parseUnlockActionId(chunk))
+    }
+
+    @Test
+    fun mapsUnlockResponse() {
+        val dto = json.decodeFromString<UnlockChapterPagesDto>(
+            """{"ok":true,"chapterId":430923,"images":["https://cdn.example/001.jpg","https://cdn.example/002.jpg"]}""",
+        )
+
+        assertTrue(dto.ok)
+        assertEquals(430923L, dto.chapterId)
+        assertEquals(2, dto.images?.size)
+    }
+
+    @Test
+    fun mapsUnlockedPagesWithChapterUrlForReferer() {
+        val chapterUrl = "https://example.com/series/alpha/chapter/1"
+        val item = json.decodeFromString<ChapterItem>(
+            """{"id":430923,"data":{"images":[]},"pagesTicket":"p1.ticket"}""",
+        )
+
+        assertEquals(430923L, item.id)
+        assertEquals("p1.ticket", item.pagesTicket)
+
+        val pages = item.toPageList(
+            chapterUrl,
+            listOf("https://cdn.example/001.jpg", "https://cdn.example/002.jpg"),
+        )
+
+        assertEquals(2, pages.size)
+        assertEquals(chapterUrl, pages[0].url)
+        assertEquals("https://cdn.example/001.jpg", pages[0].imageUrl)
+        assertEquals(chapterUrl, pages[1].url)
+        assertEquals("https://cdn.example/002.jpg", pages[1].imageUrl)
     }
 
     private fun genreFilter(vararg selected: String) = GenreFilter(staticGenres).apply {
